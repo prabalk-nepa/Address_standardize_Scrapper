@@ -145,21 +145,21 @@ with col1:
 with col2:
     st.markdown('<div class="info-box">', unsafe_allow_html=True)
     st.subheader("📊 File Information")
-    headless_mode = st.toggle("Run headless", value=True, help="Enable Chrome headless mode")
+    headless_mode = st.toggle("Hide Chrome window", value=True, help="Run Chrome off-screen (no visible browser window)")
     delay_seconds = st.slider(
         "Delay between lookups (seconds)",
-        min_value=2.5,
-        max_value=4.5,
-        value=3.0,
+        min_value=1.0,
+        max_value=4.0,
+        value=2.0,
         step=0.5,
         help="Pause between lookups; higher is safer (jitter ±0.5s applied)"
     )
     batch_size = st.slider(
         "Batch size",
         min_value=5,
-        max_value=20,
-        value=10,
-        step=1,
+        max_value=50,
+        value=20,
+        step=5,
         help="Process rows in batches; progress is saved after each batch"
     )
     st.session_state.batch_size = batch_size
@@ -229,7 +229,7 @@ if uploaded_file:
             
             # Show preview
             st.subheader("📋 Data Preview")
-            st.dataframe(df_preview.head(10), use_container_width=True)
+            st.dataframe(df_preview.head(10), width='stretch')
             st.caption(f"Showing first 10 rows of {len(df_preview)} total rows")
             
             # Processing section
@@ -243,13 +243,13 @@ if uploaded_file:
                     "▶️ Start Processing",
                     type="primary",
                     disabled=st.session_state.processing,
-                    use_container_width=True
+                    width='stretch'
                 )
             
             with col_btn2:
                 clear_cache = st.button(
                     "🧹 Clear saved progress",
-                    use_container_width=True,
+                    width='stretch',
                     disabled=not os.path.exists(work_path)
                 )
                 if clear_cache:
@@ -324,7 +324,7 @@ if uploaded_file:
                                 data=excel_data,
                                 file_name=excel_filename,
                                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                use_container_width=True,
+                                width='stretch',
                                 type="primary"
                             )
                         
@@ -337,7 +337,7 @@ if uploaded_file:
                                 data=csv_data,
                                 file_name=csv_filename,
                                 mime='text/csv',
-                                use_container_width=True
+                                width='stretch'
                             )
                         
                         st.info("💡 **Tip:** Download anytime to save your progress, even if processing isn't complete!")
@@ -396,7 +396,7 @@ if uploaded_file:
                         
                         # Show results preview
                         st.subheader("📊 Results Preview")
-                        st.dataframe(st.session_state.processed_df.head(20), use_container_width=True)
+                        st.dataframe(st.session_state.processed_df.head(20), width='stretch')
                         
                         st.balloons()
                         st.rerun()

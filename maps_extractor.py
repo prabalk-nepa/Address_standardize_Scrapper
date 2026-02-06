@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleMapsExtractor:
-    def __init__(self, headless=False, sleep_range=(3, 6)):
+    def __init__(self, headless=False, sleep_range=(1.5, 3.0)):
         self.driver = None
         self.headless = headless
-        self.sleep_min = max(0.5, float(sleep_range[0]))
+        self.sleep_min = max(0.3, float(sleep_range[0]))
         self.sleep_max = max(self.sleep_min, float(sleep_range[1]))
         self.maps_base = "https://www.google.com/maps?hl=en&gl=us"
         self.max_load_retries = 2
@@ -31,22 +31,28 @@ class GoogleMapsExtractor:
         try:
             options = uc.ChromeOptions()
             options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_argument("--start-maximized")
             options.add_argument("--disable-extensions")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--lang=en-US")
-            options.add_experimental_option("prefs", {"intl.accept_languages": "en,en_US"})
+            options.add_experimental_option("prefs", {
+                "intl.accept_languages": "en,en_US",
+            })
 
             if self.headless:
-                options.add_argument("--headless=new")
+                # --headless=new crashes Chrome 144; move window off-screen instead
+                options.add_argument("--window-position=-2400,-2400")
+            else:
+                options.add_argument("--start-maximized")
 
-            self.driver = uc.Chrome(options=options)
+            self.driver = uc.Chrome(options=options, version_main=144)
+            self.driver.set_page_load_timeout(20)
             logger.info("Chrome driver initialized successfully")
 
             try:
                 self.driver.get(self.maps_base)
-                self._wait_for_maps_loaded(timeout=20)
+                time.sleep(3)
+                logger.info("Initial Maps page loaded")
             except Exception:
                 logger.warning("Initial preload of Google Maps failed; will retry per query.")
 
@@ -73,91 +79,59 @@ class GoogleMapsExtractor:
     def _click_first_search_result(self):
         """Click on the first search result in the list."""
         try:
-            WebDriverWait(self.driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="feed"]'))
-            )
-            
-            time.sleep(2)
-            
-            strategies = [
-                ('div[role="article"] a.hfpxzc', By.CSS_SELECTOR),
-                ('div[role="article"] a[href*="/maps/place/"]', By.CSS_SELECTOR),
-                ('//div[@role="article"]//a[@class="hfpxzc"]', By.XPATH),
-                ('div.Nv2PK a.hfpxzc', By.CSS_SELECTOR),
-                ('div[role="article"] a[jsaction]', By.CSS_SELECTOR),
+            # Wait for search results feed
+            try:
+                WebDriverWait(self.driver, 8).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="feed"]'))
+                )
+            except TimeoutException:
+                logger.debug("No search results feed found")
+                return False
+
+            time.sleep(0.5)
+
+            # Find the first result link
+            selectors = [
+                'div[role="article"] a.hfpxzc',
+                'div.Nv2PK a.hfpxzc',
+                'div[role="article"] a[href*="/maps/place/"]',
             ]
-            
-            for selector, by_type in strategies:
-                try:
-                    if by_type == By.CSS_SELECTOR:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    else:
-                        elements = self.driver.find_elements(By.XPATH, selector)
-                    
-                    if elements:
-                        first_result = elements[0]
-                        
-                        try:
-                            aria_label = first_result.get_attribute('aria-label')
-                            logger.info(f"Found first result: {aria_label[:100] if aria_label else 'No label'}")
-                        except:
-                            pass
-                        
-                        self.driver.execute_script(
-                            "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", 
-                            first_result
-                        )
-                        time.sleep(1.5)
-                        
-                        WebDriverWait(self.driver, 10).until(
-                            EC.element_to_be_clickable((by_type, selector))
-                        )
-                        
-                        clicked = False
-                        
-                        try:
-                            first_result.click()
-                            clicked = True
-                            logger.info("Clicked using regular click")
-                        except Exception as e1:
-                            logger.debug(f"Regular click failed: {e1}")
-                            
-                            try:
-                                self.driver.execute_script("arguments[0].click();", first_result)
-                                clicked = True
-                                logger.info("Clicked using JavaScript click")
-                            except Exception as e2:
-                                logger.debug(f"JavaScript click failed: {e2}")
-                                
-                                try:
-                                    from selenium.webdriver.common.action_chains import ActionChains
-                                    actions = ActionChains(self.driver)
-                                    actions.move_to_element(first_result).click().perform()
-                                    clicked = True
-                                    logger.info("Clicked using ActionChains")
-                                except Exception as e3:
-                                    logger.debug(f"ActionChains click failed: {e3}")
-                        
-                        if clicked:
-                            time.sleep(3)
-                            
-                            try:
-                                WebDriverWait(self.driver, 10).until(
-                                    EC.presence_of_element_located((By.CSS_SELECTOR, '[role="main"]'))
-                                )
-                                logger.info("Successfully navigated to place details page")
-                                return True
-                            except:
-                                logger.warning("Click succeeded but place page didn't load")
-                                return False
-                        
-                except Exception as e:
-                    logger.debug(f"Strategy {selector} failed: {e}")
-                    continue
-            
-            logger.warning("Could not find or click first search result")
-            return False
-            
+
+            first_result = None
+            for sel in selectors:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                if elements:
+                    first_result = elements[0]
+                    break
+
+            if not first_result:
+                logger.warning("Could not find first search result")
+                return False
+
+            try:
+                aria_label = first_result.get_attribute('aria-label')
+                logger.info(f"Found first result: {aria_label[:100] if aria_label else 'No label'}")
+            except:
+                pass
+
+            # Click using JS (most reliable)
+            self.driver.execute_script("arguments[0].click();", first_result)
+            logger.info("Clicked first result")
+
+            # Wait for place details to appear
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-item-id="address"]')),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, '[role="main"] [data-item-id]')),
+                    )
+                )
+                logger.info("Place details page loaded")
+                return True
+            except TimeoutException:
+                logger.warning("Click succeeded but place details didn't load")
+                return False
+
         except Exception as e:
             logger.error(f"Error clicking first search result: {e}")
             return False
@@ -169,22 +143,12 @@ class GoogleMapsExtractor:
         """
         if not text or len(text) < 20:
             return False
-        
-        # Must have a ZIP code (5 digits or 5+4 format)
+
         has_zip = bool(re.search(r'\b\d{5}(-\d{4})?\b', text))
-        
-        # Must have state abbreviation (2 capital letters)
         has_state = bool(re.search(r'\b[A-Z]{2}\b', text))
-        
-        # Must have city (word before state, typically)
         has_city = bool(re.search(r',\s*[A-Za-z\s]+,\s*[A-Z]{2}', text))
-        
-        # Should have comma separators (typical of complete addresses)
         has_commas = text.count(',') >= 2
-        
-        logger.debug(f"Address validation for '{text[:50]}...': ZIP={has_zip}, State={has_state}, City={has_city}, Commas={has_commas}")
-        
-        # Complete address must have ZIP, state, and either city pattern or multiple commas
+
         return has_zip and has_state and (has_city or has_commas)
 
     def _extract_address_multiple_strategies(self):
@@ -194,32 +158,29 @@ class GoogleMapsExtractor:
             self._extract_from_aria_labels,
             self._extract_from_buttons
         ]
-        
+
         for strategy in strategies:
             try:
                 address = strategy()
                 if address and address.strip():
-                    # CRITICAL: Only accept if it's a COMPLETE address
                     if self._is_complete_address(address):
-                        logger.info(f"✓ Complete address found using {strategy.__name__}: {address}")
+                        logger.info(f"Complete address found using {strategy.__name__}: {address}")
                         return address.strip()
                     else:
-                        logger.warning(f"✗ Incomplete address rejected from {strategy.__name__}: {address}")
+                        logger.warning(f"Incomplete address rejected from {strategy.__name__}: {address}")
             except Exception as e:
                 logger.debug(f"{strategy.__name__} failed: {e}")
                 continue
-        
+
         return None
 
     def _extract_from_place_card(self):
         """Extract address from the place information card (detail page only)."""
         try:
-            # Wait for the detail page to load
-            WebDriverWait(self.driver, 20).until(
+            WebDriverWait(self.driver, 8).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, '[role="main"]'))
             )
-            
-            # Strategy 1: Direct button with data-item-id="address"
+
             try:
                 address_button = self.driver.find_element(By.CSS_SELECTOR, 'button[data-item-id="address"]')
                 address_div = address_button.find_element(By.CSS_SELECTOR, 'div.Io6YTe.fontBodyMedium')
@@ -229,8 +190,7 @@ class GoogleMapsExtractor:
                     return text
             except NoSuchElementException:
                 logger.debug("Could not find button[data-item-id='address']")
-            
-            # Strategy 2: From aria-label on address button
+
             try:
                 buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button[data-item-id="address"]')
                 for button in buttons:
@@ -242,11 +202,10 @@ class GoogleMapsExtractor:
                             return address
             except:
                 pass
-            
-            # Strategy 3: Look for div.Io6YTe inside address button
+
             try:
                 address_divs = self.driver.find_elements(
-                    By.CSS_SELECTOR, 
+                    By.CSS_SELECTOR,
                     'button[data-item-id="address"] div.Io6YTe'
                 )
                 for div in address_divs:
@@ -256,8 +215,7 @@ class GoogleMapsExtractor:
                         return text
             except:
                 pass
-            
-            # Strategy 4: All divs inside address button
+
             try:
                 buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button[data-item-id="address"]')
                 for button in buttons:
@@ -269,7 +227,7 @@ class GoogleMapsExtractor:
                             return text
             except:
                 pass
-            
+
             return None
         except Exception as e:
             logger.debug(f"_extract_from_place_card error: {e}")
@@ -279,10 +237,10 @@ class GoogleMapsExtractor:
         """Extract address from aria-labels."""
         try:
             elements = self.driver.find_elements(
-                By.XPATH, 
+                By.XPATH,
                 '//*[@aria-label and (contains(@aria-label, "Address") or contains(@aria-label, "address"))]'
             )
-            
+
             for element in elements:
                 aria_label = element.get_attribute('aria-label')
                 if aria_label:
@@ -291,7 +249,7 @@ class GoogleMapsExtractor:
                             address = aria_label.split(prefix, 1)[1].strip()
                             if len(address) > 20:
                                 return address
-            
+
             return None
         except Exception as e:
             logger.debug(f"_extract_from_aria_labels error: {e}")
@@ -301,14 +259,14 @@ class GoogleMapsExtractor:
         """Extract address from buttons with data attributes."""
         try:
             buttons = self.driver.find_elements(By.TAG_NAME, 'button')
-            
+
             for button in buttons:
                 data_item_id = button.get_attribute('data-item-id')
                 if data_item_id and 'address' in data_item_id.lower():
                     text = button.text.strip()
                     if text and len(text) > 20:
                         return text
-                
+
                 try:
                     nested_divs = button.find_elements(By.TAG_NAME, 'div')
                     for div in nested_divs:
@@ -317,20 +275,22 @@ class GoogleMapsExtractor:
                             return text
                 except:
                     continue
-            
+
             return None
         except Exception as e:
             logger.debug(f"_extract_from_buttons error: {e}")
             return None
 
-    def _wait_for_maps_loaded(self, timeout=15):
-        """Wait until the Maps search box or map canvas is present."""
+    def _wait_for_maps_loaded(self, timeout=10):
+        """Wait until any Google Maps page element is present."""
         try:
             WebDriverWait(self.driver, timeout).until(
                 EC.any_of(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-item-id="address"]')),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '[role="main"]')),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="feed"]')),
                     EC.presence_of_element_located((By.ID, "searchboxinput")),
-                    EC.presence_of_element_located((By.XPATH, '//input[@aria-label="Search Google Maps"]')),
-                    EC.presence_of_element_located((By.XPATH, '//canvas[@aria-label="Map"]'))
+                    EC.presence_of_element_located((By.XPATH, '//canvas[@aria-label="Map"]')),
                 )
             )
             return True
@@ -343,74 +303,49 @@ class GoogleMapsExtractor:
         """Search for an address on Google Maps and extract the standard address."""
         try:
             self.lookup_type = "direct"
-            
+
             encoded_address = quote(address)
             url = f"https://www.google.com/maps/search/{encoded_address}?hl=en&gl=us"
 
             logger.info(f"Searching for: {address}")
 
-            loaded = False
-            for attempt in range(self.max_load_retries):
+            try:
+                self.driver.get(url)
+            except TimeoutException:
+                logger.warning(f"Page load timed out for: {address}")
+            except Exception as e:
+                logger.warning(f"Navigation error for: {address}: {e}")
                 try:
+                    self._restart_driver()
                     self.driver.get(url)
-                    loaded = self._wait_for_maps_loaded(timeout=30)
-                    if loaded:
-                        break
                 except Exception:
-                    loaded = False
-                
-                try:
-                    self.driver.get(self.maps_base)
-                    self._wait_for_maps_loaded(timeout=15)
-                except Exception:
-                    pass
+                    return "N/A", "N/A"
 
-                if not loaded and attempt == self.max_load_retries - 1:
-                    logger.warning("Restarting driver due to Maps load failure.")
-                    if not self._restart_driver():
-                        logger.error("Driver restart failed.")
-                        break
-
-            if not loaded:
-                logger.warning(f"Maps did not load correctly for: {address}")
+            # Wait for Maps to load any recognizable element
+            if not self._wait_for_maps_loaded(timeout=12):
+                logger.warning(f"Maps did not load for: {address}")
                 return "N/A", "N/A"
 
-            self._human_pause()
-
-            try:
-                self.driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(50, 150))
-                time.sleep(1)
-            except Exception:
-                pass
-
-            # STEP 1: Try direct extraction (only from detail page elements)
-            logger.info("Attempting direct address extraction from detail page...")
+            # STEP 1: Check if Maps redirected directly to a place page
             address_text = self._extract_address_multiple_strategies()
-            
-            # Check if we got a COMPLETE address directly
+
             if address_text and self._is_complete_address(address_text):
-                logger.info(f"✓ Found COMPLETE address directly: {address_text}")
+                logger.info(f"Found address directly: {address_text}")
                 self.lookup_type = "direct"
                 return address_text, self.lookup_type
 
-            # STEP 2: Direct extraction failed or incomplete - click first result
-            logger.info("Direct extraction failed or incomplete. Clicking first search result...")
+            # STEP 2: We got search results instead — click the first one
+            logger.info("No direct place page. Clicking first search result...")
             if self._click_first_search_result():
                 self.lookup_type = "indirect"
-                time.sleep(2)
-                
-                # Extract from the detail page after clicking
                 address_text = self._extract_address_multiple_strategies()
-                
+
                 if address_text and self._is_complete_address(address_text):
-                    logger.info(f"✓ Found COMPLETE address after clicking first result: {address_text}")
+                    logger.info(f"Found address after clicking result: {address_text}")
                     return address_text, self.lookup_type
-                else:
-                    logger.warning(f"Could not extract COMPLETE address even after clicking. Got: {address_text}")
-                    return "N/A", "N/A"
-            else:
-                logger.warning(f"Could not click first result for: {address}")
-                return "N/A", "N/A"
+
+            logger.warning(f"Could not extract address for: {address}")
+            return "N/A", "N/A"
 
         except Exception as e:
             logger.error(f"Error searching for address '{address}': {e}")
@@ -433,7 +368,10 @@ class GoogleMapsExtractor:
                 if pd.isna(val):
                     return ""
                 text = str(val).strip()
-                return "" if text.lower() == "nan" else text
+                if text.lower() == "nan":
+                    return ""
+                text = re.sub(r'\s*\([^)]*\)', '', text).strip()
+                return text
 
             parts = [
                 clean(row.get('street_')),
@@ -450,7 +388,7 @@ class GoogleMapsExtractor:
 
         df['search_query'] = df.apply(build_query, axis=1)
         df = df.drop_duplicates(subset=['search_query']).reset_index(drop=True)
-        
+
         if not keep_existing or 'standard_address' not in df.columns:
             df['standard_address'] = "N/A"
         else:
@@ -469,7 +407,7 @@ class GoogleMapsExtractor:
         if not df['processed'].any():
             filled = df['standard_address'].astype(str).str.strip().fillna("")
             df.loc[(filled != "") & (filled.str.upper() != "N/A"), 'processed'] = True
-        
+
         return df
 
     def process_file(self, input_file, output_file, progress_callback=None, resume=False, batch_size=10):
@@ -557,21 +495,21 @@ class GoogleMapsExtractor:
 def main():
     """Main function for command-line usage"""
     import sys
-    
+
     if len(sys.argv) != 3:
         print("Usage: python maps_extractor.py <input_file> <output_file>")
         sys.exit(1)
-    
+
     input_file = sys.argv[1]
     output_file = sys.argv[2]
-    
+
     extractor = GoogleMapsExtractor()
     success, result = extractor.process_file(input_file, output_file)
-    
+
     if success:
-        print(f"\n✅ Success! Output saved to: {output_file}")
+        print(f"\n Success! Output saved to: {output_file}")
     else:
-        print(f"\n❌ Error: {result}")
+        print(f"\n Error: {result}")
 
 
 if __name__ == "__main__":
