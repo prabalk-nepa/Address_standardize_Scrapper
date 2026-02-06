@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.venv/
+web-scrappe_venv/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.xlsx
+*.xls
+*.csv
+.git
+.gitignore
+Dockerfile
